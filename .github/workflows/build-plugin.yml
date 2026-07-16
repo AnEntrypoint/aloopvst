@@ -1,0 +1,78 @@
+# Build the aloopvst VST3/Standalone plugin on Windows/macOS/Linux.
+#
+# WHY multi-OS, unlike aloop's own single-target (aarch64 musl Alpine) pipeline:
+# aloop targets one fixed hardware appliance; aloopvst is a DAW plugin, and DAW
+# users run Windows, macOS, and Linux. JUCE's CMake support builds VST3
+# everywhere and AU additionally on macOS.
+#
+# Faust codegen (dsp/aloop.dsp -> loop.cpp) runs on Ubuntu (which packages faust
+# directly) and the generated C++ is uploaded as an artifact so the macOS/
+# Windows jobs — which don't reliably have faust available — can consume it
+# without needing faust installed there, mirroring aloop's own
+# pre-generate-on-Ubuntu-then-consume-elsewhere pattern (build-binary.yml).
+name: build-plugin
+
+on:
+  push:
+    paths:
+      - 'Source/**'
+      - 'dsp/**'
+      - 'effects/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-plugin.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  generate-faust-cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install faust
+        run: sudo apt-get update && sudo apt-get install -y faust
+      - name: Generate loop.cpp
+        run: |
+          mkdir -p dsp/generated
+          faust -lang cpp -cn AloopLoopDsp -I dsp -I effects/home/faust dsp/aloop.dsp -o dsp/generated/loop.cpp
+          echo "generated $(wc -l < dsp/generated/loop.cpp) lines of loop C++"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-loop-cpp
+          path: dsp/generated/loop.cpp
+
+  build:
+    needs: generate-faust-cpp
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated-loop-cpp
+          path: dsp/generated
+
+      - name: Install Linux plugin build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev \
+            libcurl4-openssl-dev libfreetype-dev libx11-dev libxcomposite-dev \
+            libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libwebkit2gtk-4.1-dev libglu1-mesa-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aloopvst-${{ matrix.os }}
+          path: |
+            build/aloopvst_artefacts/Release/VST3/**
+            build/aloopvst_artefacts/Release/Standalone/**

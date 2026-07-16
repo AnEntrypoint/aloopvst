@@ -1,0 +1,8 @@
+build/
+build-*/
+*.vst3
+*.component
+*.clap
+.vs/
+.vscode/
+CMakeUserPresets.json
