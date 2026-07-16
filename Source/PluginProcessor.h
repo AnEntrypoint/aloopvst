@@ -59,6 +59,38 @@ public:
     ParamStore& paramStore() { return paramStore_; }
     juce::AudioProcessorValueTreeState& apvts() { return apvts_; }
 
+    // Called from the message thread (LooperCell button clicks in
+    // PluginEditor.cpp) to inject a synthetic pad gesture. MUST NOT call
+    // controlSurface_.dispatchEvent() directly from here -- ApcControlSurface
+    // has no internal thread-safety of its own (its plain, non-atomic member
+    // state was designed for every dispatch to happen from processBlock's
+    // audio-thread MIDI iteration, matching aloop's own runMidiLoop-drives-
+    // ApcGrid single-thread-owns-this-state design). WITNESSED (this
+    // session, via a diagnostic harness that isolated the engine from the
+    // GUI): the engine's actual record/finish/play logic is fully correct
+    // when driven from a single thread -- the reported "loopers lit up but
+    // weren't audible" symptom traced to exactly this data race: a mouse
+    // click's dispatchEvent() call landing on the message thread while
+    // processBlock's own dispatchEvent/pollHolds calls run concurrently on
+    // the audio thread, corrupting ApcControlSurface's un-synchronized
+    // state. Queuing here and draining only inside processBlock (see its
+    // own comment) gives the UI click path the exact same single-writer
+    // guarantee real MIDI input already has.
+    void pushUiMidiEvent(const MidiEvt& ev) {
+        const juce::ScopedLock sl(uiMidiLock_);
+        if (pendingUiMidi_.size() < 256) pendingUiMidi_.push_back(ev);
+    }
+
+private:
+    // Drained once per processBlock call, on the audio thread, BEFORE the
+    // host's own MidiBuffer iteration -- see processBlock's own comment for
+    // why draining here (not from a click callback) is what actually fixes
+    // the race.
+    juce::CriticalSection uiMidiLock_;
+    std::vector<MidiEvt> pendingUiMidi_;
+
+public:
+
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     // Pushes the current APVTS parameter values into paramStore_ (the same

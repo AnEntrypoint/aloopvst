@@ -37,11 +37,28 @@ FetchContent_MakeAvailable(JUCE)
 set(GENERATED_LOOP_CPP "${CMAKE_BINARY_DIR}/loop.cpp")
 find_program(FAUST_BIN faust)
 if(FAUST_BIN)
+  # WORKING_DIRECTORY is REQUIRED here, set to the repo root: dsp/
+  # effects_runtime.dsp's component("effects/home/faust/filters.dsp") calls
+  # use a path string that is only valid relative to the repo root (the same
+  # literal string aloop's own dsp/effects_runtime.dsp uses, byte-identical --
+  # see docs/CLONE-PARITY-REFERENCE.md). aloop's own CI (build-binary.yml)
+  # invokes faust directly from a shell step whose cwd IS the repo root, so
+  # this never surfaced there. CMake's add_custom_command defaults to
+  # CMAKE_CURRENT_BINARY_DIR (the build/ dir) as its working directory --
+  # WITNESSED locally: faust failed there with "unable to open file
+  # effects/home/faust/filters.dsp" (component()'s path resolution combines
+  # each -I dir with the LITERAL path string rather than stripping the
+  # matching prefix, so -I .../effects/home/faust only ever finds
+  # .../effects/home/faust/effects/home/faust/filters.dsp -- the -I flags
+  # here are structurally redundant with a correct cwd, not a substitute for
+  # one). Fixed by pinning WORKING_DIRECTORY explicitly instead of relying on
+  # CMake's default.
   add_custom_command(
     OUTPUT  ${GENERATED_LOOP_CPP}
     COMMAND ${FAUST_BIN} -lang cpp -cn AloopLoopDsp
             -I ${CMAKE_SOURCE_DIR}/dsp -I ${CMAKE_SOURCE_DIR}/effects/home/faust
             ${CMAKE_SOURCE_DIR}/dsp/aloop.dsp -o ${GENERATED_LOOP_CPP}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     DEPENDS ${CMAKE_SOURCE_DIR}/dsp/aloop.dsp ${CMAKE_SOURCE_DIR}/dsp/loop.dsp ${CMAKE_SOURCE_DIR}/dsp/effects_runtime.dsp
     COMMENT "Compiling the Faust home stack (dsp/aloop.dsp = loop + runtime effects) to C++")
   add_custom_target(faust_loop DEPENDS ${GENERATED_LOOP_CPP})

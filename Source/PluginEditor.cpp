@@ -59,14 +59,21 @@ LooperCell::LooperCell(AloopAudioProcessor& proc, int looperIndex)
 }
 
 void LooperCell::triggerPadGesture(bool press) {
+    // Queued via pushUiMidiEvent, NOT dispatched directly -- this runs on
+    // the message thread (button onClick), while ApcControlSurface's
+    // internal state has no synchronization of its own and is only safe to
+    // mutate from processBlock's audio thread. See
+    // AloopAudioProcessor::pushUiMidiEvent's own comment for the full
+    // reasoning (a real data race here was the confirmed root cause of
+    // loopers visually arming/finishing in the UI while never actually
+    // becoming audible).
     int note = looperIndexToNote(looperIndex_);
     MidiEvt ev{};
     ev.type = press ? 0x90 : 0x80;
     ev.channel = 0;
     ev.d1 = note;
     ev.d2 = press ? 127 : 0;
-    auto nowMs = (unsigned)juce::Time::getMillisecondCounter();
-    processor_.controlSurface().dispatchEvent(ev, nowMs, processor_.paramStore(), &processor_.engine());
+    processor_.pushUiMidiEvent(ev);
 }
 
 void LooperCell::resized() {

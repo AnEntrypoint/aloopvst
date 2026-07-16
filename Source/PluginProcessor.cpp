@@ -169,6 +169,23 @@ void AloopAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     // (sample-accurate, no wall-clock scheduling jitter), matching the
     // monotonic clock the original used, just sourced differently.
     const double sampleRate = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+
+    // Drain UI-originated pad gestures FIRST (queued by pushUiMidiEvent from
+    // the message thread -- see that method's own comment for why this
+    // exists: ApcControlSurface is not internally thread-safe, so every
+    // dispatchEvent() call must happen from THIS thread, never from a
+    // button's onClick directly). Ordered before the host's own MidiBuffer
+    // so a UI click and a same-block real MIDI event process in a
+    // deterministic, if arbitrary, order rather than racing.
+    {
+        std::vector<MidiEvt> uiEvents;
+        {
+            const juce::ScopedLock sl(uiMidiLock_);
+            uiEvents.swap(pendingUiMidi_);
+        }
+        for (const auto& ev : uiEvents) controlSurface_.dispatchEvent(ev, (unsigned)samplesElapsed_, paramStore_, &engine_);
+    }
+
     for (const auto metadata : midiMessages) {
         auto msg = metadata.getMessage();
         unsigned eventNowMs = (unsigned)(((double)(samplesElapsed_ + metadata.samplePosition) / sampleRate) * 1000.0);
