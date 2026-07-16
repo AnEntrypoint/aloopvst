@@ -177,13 +177,34 @@ void AloopAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     // button's onClick directly). Ordered before the host's own MidiBuffer
     // so a UI click and a same-block real MIDI event process in a
     // deterministic, if arbitrary, order rather than racing.
+    //
+    // ROOT CAUSE FIX (WITNESSED live: "played sound into the VST while
+    // recording, but it didn't play it back"): this used to pass
+    // (unsigned)samplesElapsed_ directly as now_ms -- a raw SAMPLE COUNT,
+    // not milliseconds. At 48kHz that's off by a factor of 48: after even a
+    // few seconds of runtime, samplesElapsed_ is already hundreds of
+    // thousands, misread as an elapsed-millisecond count by
+    // applyRecPlayCycle's `elapsedMs = now_ms - m_recordStartMs[looper]`
+    // (ApcControlSurface.cpp). The garbage elapsedMs produced a garbage
+    // lenSamples, which the existing `if (lenSamples > kMaxLoopSamples_)
+    // lenSamples = kMaxLoopSamples_` guard silently clamped to exactly 60s
+    // (2,880,000 samples) on EVERY UI-click recording, regardless of how
+    // briefly the user actually held/clicked -- so a short recorded take
+    // occupied only a tiny fraction of a 60-second loop, and playback spent
+    // the overwhelming majority of each cycle silently looping through the
+    // unwritten remainder. Confirmed via a standalone diagnostic harness
+    // that isolated this exact code path from the GUI. Fixed by converting
+    // to real milliseconds, matching the host-MidiBuffer path below (which
+    // already does this conversion correctly) and aloop's own audio_thread.cpp,
+    // which likewise measures elapsed real time, never a raw sample index.
+    const unsigned uiEventNowMs = (unsigned)(((double)samplesElapsed_ / sampleRate) * 1000.0);
     {
         std::vector<MidiEvt> uiEvents;
         {
             const juce::ScopedLock sl(uiMidiLock_);
             uiEvents.swap(pendingUiMidi_);
         }
-        for (const auto& ev : uiEvents) controlSurface_.dispatchEvent(ev, (unsigned)samplesElapsed_, paramStore_, &engine_);
+        for (const auto& ev : uiEvents) controlSurface_.dispatchEvent(ev, uiEventNowMs, paramStore_, &engine_);
     }
 
     for (const auto metadata : midiMessages) {
