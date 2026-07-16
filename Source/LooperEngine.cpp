@@ -188,55 +188,102 @@ void LooperEngine::processBlock(const float* in, float* out, int n,
         // can never drift apart regardless of glitch/repeat/varispeed
         // engagement (see dsp/loop.dsp's oneLooper comment).
         //
-        // Host-transport resync (replaces the original's Link
-        // beatPhaseMicroBeats resync): when the host transport is actively
-        // playing and driving length, periodically correct any accumulated
-        // float/scheduling drift by re-deriving phase from the host's own
-        // ppq position (converted into a fraction of our phrase in samples)
-        // instead of a Link quantum fraction. Standalone (host not playing,
-        // or no usable tempo), masterPhase is purely the free-running block
-        // counter -- still fully functional, just without an external
-        // reference to correct against, exactly mirroring the original's
-        // "no Link session" standalone behavior.
+        // ROOT CAUSE FIX (WITNESSED live: "adding longer loops only makes a
+        // part of it" / "it only looped an eighth of the recorded clip"):
+        // this used to wrap masterPhase strictly at cmd/master_len (the
+        // FIRST-established loop's own length), even though a SUBSEQUENT
+        // looper is explicitly allowed to record a longer power-of-2
+        // multiple of that (ApcControlSurface's own finish-quantization
+        // snaps to M, 2M, 4M, 8M, ...). dsp/loop.dsp's absPos formula is
+        // `wrapAbs(masterPhase - recordStartPhaseOffset, wrapLen)` -- for a
+        // looper whose own wrapLen is, say, 8x masterLen, this can only
+        // ever produce values in a masterLen-wide slice of that looper's
+        // own longer ring, because masterPhase itself never counts past
+        // masterLen before wrapping back to 0. The looper's write side
+        // (writeIdx/wrapLen) genuinely captured the full recording -- it's
+        // only the READ side's shared clock that was too short to ever
+        // reach the rest of it. Confirmed via a standalone diagnostic
+        // harness: a looper recorded to 8x masterLen with a rising-pitch
+        // chirp played back only a narrow-frequency middle slice of the
+        // sweep, never reaching either its start or its end.
+        //
+        // FIX: masterPhase must wrap at the LARGEST currently-established
+        // wrapLen across every looper, not just the base masterLen --
+        // since every established length is a power-of-2 multiple of the
+        // same base masterLen (by construction, see ApcControlSurface's
+        // finish-quantization), the largest one IS the LCM of all of them,
+        // so every shorter looper's own wrapAbs(masterPhase - offset,
+        // itsOwnWrapLen) still correctly cycles through its own ring
+        // exactly as often as before (masterPhase counting further before
+        // wrapping doesn't change how many TIMES a shorter wrapLen wraps
+        // within one masterPhase period, just extends how far the longer
+        // loopers can be read) -- this generalizes the single-length case
+        // cleanly rather than special-casing it.
         {
             float masterLen = g_params->get("cmd/master_len", 0.0f);
-            if (masterLen > 0.0f) {
+            // Scan every looper's own finishtarget zone (the quantized
+            // wrapLen dsp/loop.dsp actually latched at that looper's own
+            // finishEdge) for the largest one currently in play. A looper
+            // that has never finished recording holds finishtarget at its
+            // Faust-compiled default (0), so this naturally ignores empty
+            // loopers without needing a separate has-content check.
+            float phaseWrapLen = masterLen;
+            {
+                char z[32];
+                for (int lp = 0; lp < kLooperCount; lp++) {
+                    snprintf(z, sizeof z, "looper%2d/finishtarget", lp);
+                    float lp_len = fui.get(z, 0.0f);
+                    if (lp_len > phaseWrapLen) phaseWrapLen = lp_len;
+                }
+            }
+            if (phaseWrapLen > 0.0f) {
                 if (hostDrivingLength) {
                     // hostPpqPosition is in quarter notes; one bar (4 beats)
                     // is our phrase unit (matching the lenSamples formula
                     // above), so the phrase-relative fraction is
-                    // (ppq mod 4) / 4 -- convert directly to a fraction of
-                    // masterLen (which IS that same one-bar length in
-                    // samples) rather than assuming the two ever differ.
+                    // (ppq mod 4) / 4. Scale up to phaseWrapLen (a multiple
+                    // of masterLen, which IS that one-bar length) rather
+                    // than masterLen alone, so a host-tempo resync lands on
+                    // the correct point within the LONGER wrap period too.
                     double ppqInBar = std::fmod(hostPpqPosition, kBeatsPerBar);
                     if (ppqInBar < 0.0) ppqInBar += kBeatsPerBar;
                     double phaseFrac = ppqInBar / kBeatsPerBar;
-                    masterPhaseSamples_ = phaseFrac * (double)masterLen;
+                    double barLen = (double)masterLen;
+                    double barsPerWrap = barLen > 0.0 ? (double)phaseWrapLen / barLen : 1.0;
+                    double wholeBars = std::floor(masterPhaseSamples_ / (barLen > 0.0 ? barLen : 1.0));
+                    if (barsPerWrap > 1.0) wholeBars = std::fmod(wholeBars, barsPerWrap);
+                    masterPhaseSamples_ = wholeBars * barLen + phaseFrac * barLen;
                 } else {
                     masterPhaseSamples_ += (double)N;
                 }
-                masterPhaseSamples_ = std::fmod(masterPhaseSamples_, (double)masterLen);
-                if (masterPhaseSamples_ < 0.0) masterPhaseSamples_ += masterLen;
+                masterPhaseSamples_ = std::fmod(masterPhaseSamples_, (double)phaseWrapLen);
+                if (masterPhaseSamples_ < 0.0) masterPhaseSamples_ += phaseWrapLen;
             } else {
                 masterPhaseSamples_ = 0.0;   // no phrase established yet -- hold at 0
             }
             // Ramp masterPhaseBuf_ smoothly WITHIN the block (each sample i
-            // gets masterPhaseSamples_ + i, wrapped at masterLen) -- holding
-            // it block-constant like clearBuf_/speedBuf_ would produce a
-            // stepped/aliased readback pattern (audibly indistinguishable
-            // from bitcrushing; see audio_thread.cpp's own WITNESSED note on
-            // this exact regression). masterPhase is a real per-sample
-            // POSITION signal, not a momentary/step control.
-            if (masterLen > 0.0f) {
+            // gets masterPhaseSamples_ + i, wrapped at phaseWrapLen) --
+            // holding it block-constant like clearBuf_/speedBuf_ would
+            // produce a stepped/aliased readback pattern (audibly
+            // indistinguishable from bitcrushing; see audio_thread.cpp's
+            // own WITNESSED note on this exact regression). masterPhase is
+            // a real per-sample POSITION signal, not a momentary/step
+            // control.
+            if (phaseWrapLen > 0.0f) {
                 for (int i = 0; i < N; i++) {
                     double p = masterPhaseSamples_ + (double)i;
-                    p = std::fmod(p, (double)masterLen);
-                    if (p < 0.0) p += masterLen;
+                    p = std::fmod(p, (double)phaseWrapLen);
+                    if (p < 0.0) p += phaseWrapLen;
                     masterPhaseBuf_[(size_t)i] = (float)p;
                 }
             } else {
                 std::fill(masterPhaseBuf_.begin(), masterPhaseBuf_.begin() + N, 0.0f);
             }
+            // masterLenBuf_ stays the BASE masterLen (not phaseWrapLen) --
+            // dsp/loop.dsp's gridStep (ARM-quantization's grid-tick
+            // granularity) is deliberately masterLen/16, the base phrase's
+            // own subdivision, independent of how long any individual
+            // looper's own recorded content happens to be.
             std::fill(masterLenBuf_.begin(), masterLenBuf_.begin() + N, masterLen);
         }
     } else {
