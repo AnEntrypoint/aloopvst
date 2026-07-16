@@ -7,23 +7,22 @@ builds; CI pre-generates the DSP C++ so it doesn't need faust installed).
 
 ## VST3 (Windows)
 
-Copy the whole `aloop.vst3` folder (it's a bundle, not a single file) into:
+Copy the whole `aloop.vst3` folder (it's a bundle, not a single file) into a
+folder Ableton actually scans. The default system-wide location is:
 
 ```
 C:\Program Files\Common Files\VST3\
 ```
 
-This is the one folder every VST3 host scans by default. **Ableton's "User
-Library"** (`Documents\Ableton\User Library`) is a *different* thing — that's
-where Live keeps its own native Racks/presets/Max for Live devices, and Live's
-VST3 scanner does not look there. If you'd rather not touch
-`Program Files`, open Ableton Live → Preferences → **Plug-ins** and add a
-**custom VST3 folder** pointing at wherever you keep `aloop.vst3` instead —
-either path works, but it has to be one of these two, not the User Library.
+Ableton can also be configured (Preferences → Plug-ins) to scan additional
+folders — some setups add `Documents\Ableton\User Library` itself as a custom
+VST3 folder, alongside Live's own native content, and other plugins living
+directly in that folder work fine there. Whichever folder(s) your install is
+actually configured to scan, put `aloop.vst3` there.
 
-After copying/configuring, tell Ableton to rescan (Preferences → Plug-ins →
-"Rescan" or just restart Live) — it only scans configured folders on startup
-or on an explicit rescan trigger, not automatically when a file appears.
+After copying, tell Ableton to rescan (Preferences → Plug-ins → "Rescan" or
+just restart Live) — it only scans configured folders on startup or on an
+explicit rescan trigger, not automatically when a file appears.
 
 ## VST3 (macOS)
 
