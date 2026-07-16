@@ -6,8 +6,14 @@
 # ALSA + SCHED_FIFO thread + Ableton Link + hardware APC Key25 MIDI stack. See
 # docs/ARCHITECTURE.md for the full mapping of what carries over vs what a DAW
 # host already provides.
+# LANGUAGES CXX C (not CXX alone): JUCE's own internal juceaide code-gen tool
+# is built via a nested CMake subbuild that requires the C compiler to be
+# enabled on the OUTER project too -- CI witnessed this exact failure on both
+# macOS and Linux ("CMake Error: Error required internal CMake variable not
+# set... Missing variable is: CMAKE_C_COMPILE_OBJECT") when only CXX was
+# declared here, even though this project's own sources are all C++.
 cmake_minimum_required(VERSION 3.22)
-project(aloopvst VERSION 0.1.0 LANGUAGES CXX)
+project(aloopvst VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,12 +65,20 @@ juce_add_plugin(aloopvst
   NEEDS_MIDI_OUTPUT TRUE
   EDITOR_WANTS_KEYBOARD_FOCUS FALSE)
 
+# NOTE: GENERATED_LOOP_CPP is deliberately NOT listed here. It is pulled in
+# via `#include "loop.cpp"` inside Source/FaustShim.h (itself included by
+# LooperEngine.h), where the dsp/Meta/UI macros FaustShim.h defines just
+# above the #include are in scope. Also listing it as a target_sources entry
+# would additionally compile it as its OWN separate translation unit, where
+# none of those macros are defined -- this is exactly what broke CI (MSVC
+# C2504 "'dsp': base class undefined", C2061 on Meta/UI): loop.cpp was being
+# compiled twice, once correctly (via the include) and once without the
+# macros it structurally depends on.
 target_sources(aloopvst PRIVATE
   Source/PluginProcessor.cpp
   Source/PluginEditor.cpp
   Source/LooperEngine.cpp
-  Source/ApcControlSurface.cpp
-  ${GENERATED_LOOP_CPP})
+  Source/ApcControlSurface.cpp)
 
 target_include_directories(aloopvst PRIVATE
   ${CMAKE_SOURCE_DIR}/Source

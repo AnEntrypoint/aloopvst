@@ -247,6 +247,7 @@ void AloopAudioProcessorEditor::resized() {
     // Looper grid: 5 rows x 4 cols, top ~60% of the window.
     auto gridArea = area.removeFromTop((int)(area.getHeight() * 0.55f));
     const int cols = 4;
+    const int rows = (kLooperCount + cols - 1) / cols;   // 5 rows for 20 loopers at 4 cols
     int cellW = gridArea.getWidth() / cols;
     int cellH = gridArea.getHeight() / rows;
     for (int i = 0; i < kLooperCount; i++) {
