@@ -31,8 +31,26 @@ struct FaustUI {
     void addVerticalSlider(const char* l, float* z, float, float, float, float) { zones[full(l)] = z; }
     void addHorizontalSlider(const char* l, float* z, float, float, float, float) { zones[full(l)] = z; }
     void addNumEntry(const char* l, float* z, float, float, float, float) { zones[full(l)] = z; }
-    void addHorizontalBargraph(const char*, float*, float, float) {}
-    void addVerticalBargraph(const char*, float*, float, float) {}
+    // Bargraphs (Faust hbargraph/vbargraph -- read-only telemetry OUTPUTS,
+    // e.g. dsp/loop.dsp's "level" and "writeidx" zones) are still plain
+    // float* zones under the hood, exactly like a slider's input zone --
+    // the only difference is direction (Faust writes them, the host reads
+    // them), not representation. WITNESSED live (this session, via a
+    // standalone diagnostic harness that isolated LooperEngine from the
+    // GUI): leaving these as no-ops meant fui.get("looperN/writeidx") and
+    // fui.get("looperN/level") ALWAYS returned the caller's default (0.0),
+    // silently breaking EngineTelemetry::looperWriteIdx (used by
+    // ApcControlSurface's finish-quantization for every SUBSEQUENT
+    // recording after the first -- the first recording doesn't consult
+    // writeIdx at all, which is why this specific gap didn't explain the
+    // very-first-recording symptom this session was actually chasing) and
+    // EngineTelemetry::looperLevel (the on-screen level meter, PluginEditor.cpp's
+    // LooperCell::paint). This exact no-op stub is inherited unchanged from
+    // aloop's own audio_thread.cpp FaustUI shim -- a pre-existing defect in
+    // the shared design this port faithfully replicated, not a regression
+    // introduced here; fixed properly rather than carried forward silently.
+    void addHorizontalBargraph(const char* l, float* z, float, float) { zones[full(l)] = z; }
+    void addVerticalBargraph(const char* l, float* z, float, float) { zones[full(l)] = z; }
     void addSoundfile(const char*, const char*, void**) {}
     void declare(float*, const char*, const char*) {}
 
