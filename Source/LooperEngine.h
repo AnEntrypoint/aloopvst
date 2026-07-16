@@ -151,15 +151,23 @@ public:
     //   `wipe`=0 -> FINISH (finishreq pulse + finishtarget = captured length)
     //   cycle, exactly like ApcControlSurface's own applyRecPlayCycle. This
     //   is not an approximation of "how a recording gets made" -- it IS how a
-    //   recording gets made, so recordStartPhaseOffset re-anchors correctly
-    //   from the CURRENT masterPhase (via the real finishEdge this produces),
-    //   and wrapLen re-latches to the real recorded length exactly as it
-    //   would for a live take. The only thing NOT reproduced is the
-    //   sample-for-sample PHYSICAL rotation the ring happened to be at when
-    //   it was originally saved -- immaterial, since the loop plays back as
-    //   the same repeating waveform cycle either way, freshly re-anchored to
-    //   whatever the CURRENT session's phrase-lock is, exactly matching what
-    //   a brand new recording of identical content would produce.
+    //   recording gets made, so wrapLen re-latches to the real recorded
+    //   length exactly as it would for a live take. masterPhase is held at a
+    //   FIXED 0.0 (not the live running session masterPhase) throughout every
+    //   looper's import, so recordStartPhaseOffset latches to 0 uniformly
+    //   across every restored looper -- deliberately, so they all stay
+    //   mutually phase-locked to each other after reload (see
+    //   LooperEngine.cpp's importLooperRing for the full reasoning: using the
+    //   live masterPhase instead would anchor each looper to whatever instant
+    //   ITS OWN import call happened to run at, since setStateInformation
+    //   restores loopers one at a time in a loop, reintroducing exactly the
+    //   inter-looper drift masterPhase's design exists to prevent). The only
+    //   thing NOT reproduced is the sample-for-sample PHYSICAL rotation the
+    //   ring happened to be at when it was originally saved -- immaterial,
+    //   since the loop plays back as the same repeating waveform cycle either
+    //   way, freshly re-anchored so every restored looper starts back in
+    //   phrase together, exactly matching what recording them all together
+    //   right after reload would produce.
     // Neither direction ever triggers a spurious armEdge/finishEdge for any
     // OTHER looper, and never touches dsp/loop.dsp itself -- see
     // LooperEngine.cpp for the full safety argument (armPulse/armEdge only

@@ -538,6 +538,25 @@ void LooperEngine::importLooperRing(int looperIndex, const std::vector<int16_t>&
             // line 489), and every OTHER looper's masterPhase-driven read
             // continuing at 0 here is fine since this whole import runs
             // between processBlock calls, not interleaved with live playback.
+            //
+            // PHASE-LOCK CONSISTENCY ACROSS RESTORED LOOPERS: holding
+            // masterPhase at exactly 0.0 for EVERY looper's import (not just
+            // this one) means recordStartPhaseOffsetStep's finishEdge latch
+            // (dsp/loop.dsp line 421: ba.if(finishEdge, masterPhase, prev))
+            // sets recordStartPhaseOffset=0 uniformly across every looper
+            // setStateInformation restores this way -- so all restored
+            // loopers anchor to the SAME reference point and stay mutually
+            // in-phase with each other after reload (absPos = wrapAbs(
+            // masterPhase - recordStartPhaseOffset, wrapLen) reduces to
+            // wrapAbs(masterPhase, wrapLen) for all of them), exactly as if
+            // they had all been freshly recorded back-to-back at the same
+            // instant. Using the LIVE running masterPhase instead here would
+            // have been wrong: it would anchor each looper to whatever
+            // instant its own importLooperRing call happened to run at
+            // (loopers are restored one at a time in a loop in
+            // setStateInformation), reintroducing exactly the
+            // inter-looper drift dsp/loop.dsp's masterPhase design exists to
+            // prevent -- see loop.dsp's own "PHRASE-LOCK" comment.
             masterPhaseBuf_[(size_t)i] = 0.0f;
         }
         float* fins[6]  = { fin_.data(), prevFiltOut_.data(), clearBuf_.data(), speedBuf_.data(), masterPhaseBuf_.data(), masterLenBuf_.data() };
