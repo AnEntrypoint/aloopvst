@@ -175,7 +175,6 @@ private:
     bool m_looperErased[kLooperCount] = {};
     unsigned m_looperEraseReleaseAt[kLooperCount] = {};
     unsigned m_looperFinishReqReleaseAt[kLooperCount] = {};
-    bool m_looperArmedOnPress[kLooperCount] = {};
     bool m_looperPlaying[kLooperCount] = {};
     bool m_looperHasContent[kLooperCount] = {};
     bool m_looperRecording[kLooperCount] = {};

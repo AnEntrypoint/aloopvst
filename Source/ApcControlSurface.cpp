@@ -56,33 +56,72 @@ static void setLooper(ParamStore& ps, int looper, const char* field, float v) {
     ps.setByName(name, v);
 }
 
-// Ported verbatim from apc_grid.cpp's deriveTempoQuant (itself ported from
-// ../looper's real linkDeriveQuant, abletonLink.cpp:884-907). The fixed base
-// quantum is 4 bars = 16 beats; candidates are multiples/divisions of that
-// base (1,2,4,8,16,32,64,128 beats). Whichever candidate's implied tempo
-// lands NEAREST 120 BPM wins, preferring the [80,160] window if any
-// candidate lands inside it.
+// Derives the shared phrase from the FIRST loop's raw recorded length only
+// (never re-derived from later loopers -- see ApcControlSurface.h's own
+// note that all subsequent loopers quantize AGAINST this single detected
+// phrase, they never redefine it). Rewritten per explicit spec (replacing
+// the old fixed-4-bar-base/absolute-beat-count scheme, which searched a
+// hardcoded {1,2,4,8,...,128} beat-count set against an assumed 4-bar
+// quantum -- a different, more convoluted scheme than what's actually
+// wanted here): treat the raw recorded length as implying some tempo
+// (recordedSeconds = 1 beat), then try every power-of-2 SCALING of that
+// same length (both stretching and compressing it) and keep whichever
+// scaling's implied BPM lands closest to 120 -- exact math, no beat-count
+// table, no [80,160]-window special case. A minimum of a 16th note (1/4 of
+// one beat) at the CHOSEN tempo is enforced as a floor, so a short take
+// (e.g. one hi-hat hit) can resolve to a fast 16th-note-length phrase
+// instead of being force-stretched up to a whole beat or more.
 struct TempoSolveResult {
     double bpm;
-    double beats;
+    double beats;       // the winning scaling, in BEATS (may be < 1, e.g. 0.25 for a 16th note)
 };
 static TempoSolveResult deriveTempoQuant(double seconds) {
-    if (seconds <= 0.0) return {120.0, 16.0};
-    static const double kCandidates[] = {1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0};
-    TempoSolveResult best = {120.0, 16.0};
+    if (seconds <= 0.0) return {120.0, 1.0};
+    const double kSixteenthBeats = 0.25;   // 1/4 of a beat = a 16th note
+    // Model: the recorded length spans `beats` beats at the chosen tempo,
+    // so bpm = 60*beats/seconds -- INCREASING in beats (more beats packed
+    // into the same fixed recorded length means each beat is shorter, i.e.
+    // faster). `beats` is constrained to a power of 2 (2^k for integer k,
+    // including negative k for sub-beat subdivisions like a 16th note).
+    // The exact (non-power-of-2) beats value that would land bpm at
+    // precisely 120 is `2*seconds` (solving 60*beats/seconds=120 for
+    // beats); the nearest achievable power-of-2 is whichever integer k is
+    // closest to log2 of that (evaluate a small neighborhood around the
+    // floor, since rounding log2 naively can pick the wrong side when the
+    // true optimum sits close to a .5 boundary).
+    //
+    // ROOT CAUSE of a real bug caught in testing (a 60ms recording
+    // resolved to a 3.4-SECOND phrase -- 56x longer than what was
+    // recorded, exactly backwards from the intended "short takes become
+    // fast subdivisions" behavior): an earlier draft of this function used
+    // bpm = rawBpm/beats (rawBpm = 60/seconds, i.e. treating the raw
+    // length as exactly 1 beat and dividing by a scaling factor) -- that
+    // formula has beats and bpm move in the WRONG relative direction, so
+    // the search picked large beats values to LOWER an already-too-fast
+    // rawBpm instead of picking small (sub-1) beats values to describe a
+    // short recording as a fast subdivision. Verified against the correct
+    // model above via manual calculation before fixing.
+    double exactBeats = 2.0 * seconds;
+    double kExact = std::log2(exactBeats);
+    long kFloor = (long)std::floor(kExact);
     double bestDist = 1e18;
-    bool bestInWindow = false;
-    for (double beats : kCandidates) {
+    TempoSolveResult best = {120.0, 1.0};
+    bool found = false;
+    for (long k = kFloor - 1; k <= kFloor + 2; k++) {
+        double beats = std::pow(2.0, (double)k);
+        if (beats < kSixteenthBeats) continue;   // never propose below a 16th note
         double bpm = 60.0 * beats / seconds;
-        bool inWindow = (bpm >= 80.0 && bpm <= 160.0);
         double dist = std::fabs(bpm - 120.0);
-        bool better = inWindow && !bestInWindow;
-        bool tieBreak = (inWindow == bestInWindow) && (dist < bestDist);
-        if (better || tieBreak) {
-            best = {bpm, beats};
-            bestDist = dist;
-            bestInWindow = inWindow;
-        }
+        if (dist < bestDist) { bestDist = dist; best = {bpm, beats}; found = true; }
+    }
+    // Degenerate case: even the 16th-note floor produces a beats value
+    // this loop's neighborhood search missed (e.g. an extremely short
+    // recording where kFloor-1 also falls below the floor) -- fall back to
+    // the floor itself directly rather than the arbitrary {120,1.0}
+    // default, so a very short take still resolves to SOMETHING sane.
+    if (!found) {
+        double bpm = 60.0 * kSixteenthBeats / seconds;
+        best = {bpm, kSixteenthBeats};
     }
     return best;
 }
@@ -103,15 +142,35 @@ void ApcControlSurface::applyRecPlayCycle(int looper, unsigned now_ms, ParamStor
         // cmd/master_len to 0 on CLEAR_ALL) -- keeps both in agreement.
         m_masterLenSamples = (long)ps.get("cmd/master_len", 0.0f);
         if (m_masterLenSamples == 0) {
-            unsigned elapsedMs = now_ms - m_recordStartMs[looper];
-            long lenSamples = (long)elapsedMs * sr / 1000;
-            // Safety margin (10ms): a freshly-computed length even slightly
-            // longer than what was actually written reads into pre-clear
-            // silence for part of the loop -- see apc_grid.cpp's own
-            // WITNESSED note on this exact bug ("recording the wrong part of
-            // the input buffer" on the first post-clear recording).
-            const long kSafetyMarginSamples = sr / 100;   // 10ms
-            lenSamples -= kSafetyMarginSamples;
+            // EXACT elapsed sample count, read LIVE from the writeidx Faust
+            // zone via fui() (dsp/loop.dsp counts writeIdx up unconditionally
+            // while recordingGate is true, so its value at this exact
+            // instant -- BEFORE the finish push below changes anything -- is
+            // precisely how many samples this take wrote, no estimate
+            // needed). Deliberately NOT engine->snapshotTelemetry(): that
+            // snapshot is only refreshed once per LooperEngine::processBlock
+            // call, so by the time a press dispatched mid-block reaches here,
+            // it reflects the PREVIOUS block's writeIdx, not the true
+            // current value -- a real, confirmed one-block-stale read (this
+            // exact staleness produced a measurably wrong recorded_bpm in
+            // testing). fui().get() reads the live zone directly, with no
+            // such lag. Previously this also used a wall-clock millisecond
+            // estimate (now_ms - m_recordStartMs[looper]) with a GUESSED
+            // 10ms "safety margin" subtracted to compensate for that
+            // estimate's own imprecision -- a workaround for not having the
+            // real number, not a correct measurement; reading the live zone
+            // makes that margin unnecessary too. Falls back to the wall-clock
+            // estimate only if engine is unavailable (defensive; should not
+            // happen once prepareToPlay has run), matching the same fallback
+            // the subsequent-recording branch below already uses.
+            long lenSamples;
+            if (engine) {
+                char z[32]; snprintf(z, sizeof z, "looper%2d/writeidx", looper);
+                lenSamples = (long)engine->fui().get(z, 0.0f);
+            } else {
+                unsigned elapsedMs = now_ms - m_recordStartMs[looper];
+                lenSamples = (long)elapsedMs * sr / 1000;
+            }
             if (lenSamples < 64) lenSamples = 64;
             if (lenSamples > kMaxLoopSamples_) lenSamples = kMaxLoopSamples_;
             m_masterLenSamples = lenSamples;
@@ -156,16 +215,21 @@ void ApcControlSurface::applyRecPlayCycle(int looper, unsigned now_ms, ParamStor
             // (M/16 minimum, and the 68% threshold replacing a
             // fixed-small-set nearest-distance search).
             //
-            // ARM-QUANTIZATION compensation: prefer reading writeIdx's own
-            // telemetry (the TRUE elapsed sample count since the real,
-            // grid-aligned arm instant) via LooperEngine's snapshot, falling
-            // back to the wall-clock estimate only if the engine pointer is
-            // unavailable (defensive; should not happen once prepareToPlay
-            // has run).
+            // ARM-QUANTIZATION compensation: read writeIdx's own zone LIVE
+            // via fui() (the TRUE elapsed sample count since the real,
+            // grid-aligned arm instant), not via LooperEngine's
+            // snapshotTelemetry() -- that snapshot only refreshes once per
+            // processBlock call, so a press dispatched mid-block would read
+            // the PREVIOUS block's writeIdx, a real one-block-stale value
+            // (confirmed: this exact staleness produced a measurably wrong
+            // quantized length in testing of the first-recording branch
+            // above, which had the identical bug). Falls back to the
+            // wall-clock estimate only if the engine pointer is unavailable
+            // (defensive; should not happen once prepareToPlay has run).
             long rawSamples;
             if (engine) {
-                EngineTelemetry t = engine->snapshotTelemetry();
-                rawSamples = (long)t.looperWriteIdx[looper];
+                char z[32]; snprintf(z, sizeof z, "looper%2d/writeidx", looper);
+                rawSamples = (long)engine->fui().get(z, 0.0f);
             } else {
                 unsigned elapsedMs = now_ms - m_recordStartMs[looper];
                 rawSamples = (long)elapsedMs * sr / 1000;
@@ -234,15 +298,16 @@ void ApcControlSurface::onPadPress(int note, unsigned now_ms, ParamStore& ps, Lo
 
         m_looperErased[looper] = false;
         m_looperHoldStart[looper] = now_ms;
-        // Press-time-critical arm/finish: an empty pad arms record on
-        // PRESS, and a CURRENTLY RECORDING pad finishes recording on PRESS
-        // too. All other transitions (pause/resume) stay on release.
-        if (!m_looperHasContent[looper] || m_looperRecording[looper]) {
-            applyRecPlayCycle(looper, now_ms, ps, engine);
-            m_looperArmedOnPress[looper] = true;
-        } else {
-            m_looperArmedOnPress[looper] = false;
-        }
+        // ALL transitions fire on PRESS now (arm, finish, pause, resume) --
+        // simplified from the original split (arm/finish on press,
+        // pause/resume on release) per explicit user request: every tap of
+        // a pad is one discrete gesture, so the whole rec/play/pause/resume
+        // cycle advances on the press instant alone, with no state change
+        // left pending for the matching release. onPadRelease below still
+        // only clears the held-flag bookkeeping (needed for the repeated-
+        // note-on guard and the hold-to-erase timer), it never advances the
+        // cycle itself anymore.
+        applyRecPlayCycle(looper, now_ms, ps, engine);
         return;
     }
     int preset = gridPresetIndex(row, col);
@@ -256,17 +321,14 @@ void ApcControlSurface::onPadPress(int note, unsigned now_ms, ParamStore& ps, Lo
 
 void ApcControlSurface::onPadRelease(int note, unsigned now_ms, ParamStore& ps, LooperEngine* engine) {
     int row = note / kApcCols, col = note % kApcCols;
+    (void)ps; (void)engine;   // no longer used here -- the cycle itself advances on press now
 
     int looper = gridLooperIndex(row, col);
     if (looper >= 0) {
-        if (m_looperArmedOnPress[looper]) {
-            m_looperArmedOnPress[looper] = false;
-            m_looperHeld[looper] = false;
-            return;
-        }
-        if (m_looperHeld[looper] && !m_looperErased[looper]) {
-            applyRecPlayCycle(looper, now_ms, ps, engine);
-        }
+        // The rec/play/pause/resume cycle now advances entirely on press
+        // (see onPadPress) -- release only clears the held-flag so the
+        // repeated-note-on guard and the hold-to-erase timer (pollHolds)
+        // both see the pad as no longer down.
         m_looperHeld[looper] = false;
         return;
     }
@@ -308,7 +370,6 @@ void ApcControlSurface::pollHolds(unsigned now_ms, ParamStore& ps) {
             m_looperRecording[looper] = false;
         }
         m_looperErased[looper] = true;
-        m_looperArmedOnPress[looper] = false;
         m_looperHasContent[looper] = false;
         m_looperPlaying[looper] = false;
         setLooper(ps, looper, "play", 0.0f);
@@ -399,7 +460,6 @@ void ApcControlSurface::onClearAll(bool held, ParamStore& ps) {
     for (int lp = 0; lp < kLooperCount; lp++) {
         m_looperHeld[lp] = false;
         m_looperErased[lp] = false;
-        m_looperArmedOnPress[lp] = false;
         m_looperPlaying[lp] = false;
         m_looperHasContent[lp] = false;
         m_looperRecording[lp] = false;
