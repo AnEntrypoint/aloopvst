@@ -536,7 +536,19 @@ with {
     // is real, unlike the FIRST (rejected) readposdiag attempt.
     writeIdxMeter = hbargraph("writeidx", 0.0, float(MAXLEN));
     attachWriteIdx(x) = attach(x, x*0.0 + float(writeIdx) : writeIdxMeter);
-    attachLevel(x) = attach(x, abs(x) : ba.slidingMax(4096, 4096) : levelMeter) : attachWriteIdx;
+    // wrapLen telemetry: exposes the LATCHED loop length (post-FINISH), same
+    // proven attach()-chain idiom as writeIdxMeter above -- ported from
+    // aloop's own dsp/loop.dsp (this repo's authoritative behavior-spec
+    // sibling, see AGENTS.md), which added this to close the exact same
+    // testability gap: writeIdx only shows the CURRENT recording's live
+    // elapsed count (meaningless once recording stops), so there was no way
+    // to verify a finished loop's actual quantized length without either
+    // listening to it or reading raw C++ state. wrapLen itself only changes
+    // at finishEdge, so this reads back the TRUE sample-accurate length
+    // every consumer of this looper's read side (readPos/gridStep) uses.
+    wrapLenMeter = hbargraph("wraplen", 0.0, float(MAXLEN));
+    attachWrapLen(x) = attach(x, x*0.0 + float(wrapLen) : wrapLenMeter);
+    attachLevel(x) = attach(x, abs(x) : ba.slidingMax(4096, 4096) : levelMeter) : attachWriteIdx : attachWrapLen;
 };
 
 // The engine outputs (dry-thru, loop-sum) SEPARATELY rather than pre-summed, so

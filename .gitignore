@@ -4,5 +4,6 @@ build-*/
 *.component
 *.clap
 .vs/
-.vscode/
 CMakeUserPresets.json
+config.bat
+node_modules
